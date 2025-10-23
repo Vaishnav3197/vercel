@@ -1,31 +1,22 @@
 from http.server import BaseHTTPRequestHandler
 import json
-import sqlite3
 import hashlib
+import os
+from upstash_redis import Redis
+from datetime import datetime
 
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
-def init_db():
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    conn.commit()
-    conn.close()
+# Initialize Redis client
+redis_client = Redis(
+    url=os.environ.get('UPSTASH_REDIS_REST_URL'),
+    token=os.environ.get('UPSTASH_REDIS_REST_TOKEN')
+)
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
-            init_db()  # Ensure database is initialized
-
             content_length = int(self.headers['Content-Length'])
             post_data = self.rfile.read(content_length)
             data = json.loads(post_data.decode('utf-8'))
@@ -48,25 +39,23 @@ class handler(BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps({'error': 'Password must be at least 6 characters'}).encode())
                 return
 
-            conn = sqlite3.connect('users.db')
-            c = conn.cursor()
-
-            # Check if user already exists
-            c.execute('SELECT * FROM users WHERE email = ?', (email,))
-            if c.fetchone():
-                conn.close()
+            # Check if user already exists in Redis
+            if redis_client.exists(f"user:{email}"):
                 self.send_response(409)
                 self.send_header('Content-type', 'application/json')
                 self.end_headers()
                 self.wfile.write(json.dumps({'error': 'Email already registered'}).encode())
                 return
 
-            # Insert new user
+            # Create new user in Redis
             hashed_pw = hash_password(password)
-            c.execute('INSERT INTO users (name, email, password) VALUES (?, ?, ?)',
-                      (name, email, hashed_pw))
-            conn.commit()
-            conn.close()
+            user_data = {
+                'name': name,
+                'email': email,
+                'password': hashed_pw,
+                'created_at': datetime.now().isoformat()
+            }
+            redis_client.set(f"user:{email}", json.dumps(user_data))
 
             self.send_response(201)
             self.send_header('Content-type', 'application/json')

@@ -1,6 +1,13 @@
 from http.server import BaseHTTPRequestHandler
 import json
-import sqlite3
+import os
+from upstash_redis import Redis
+
+# Initialize Redis client
+redis_client = Redis(
+    url=os.environ.get('UPSTASH_REDIS_REST_URL'),
+    token=os.environ.get('UPSTASH_REDIS_REST_TOKEN')
+)
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -18,15 +25,11 @@ class handler(BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps({'error': 'Email is required'}).encode())
                 return
 
-            conn = sqlite3.connect('users.db')
-            c = conn.cursor()
-
-            c.execute('SELECT * FROM users WHERE email = ?', (email,))
-            user = c.fetchone()
-            conn.close()
+            # Check if user exists in Redis
+            user_exists = redis_client.exists(f"user:{email}")
 
             # Always return success to prevent email enumeration
-            if user:
+            if user_exists:
                 # In production, send actual email here
                 print(f"Password reset link would be sent to: {email}")
                 self.send_response(200)

@@ -1,14 +1,21 @@
 from http.server import BaseHTTPRequestHandler
 import json
-import sqlite3
 import hashlib
 import secrets
+import os
+from upstash_redis import Redis
 
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
 def generate_token():
     return secrets.token_hex(32)
+
+# Initialize Redis client
+redis_client = Redis(
+    url=os.environ.get('UPSTASH_REDIS_REST_URL'),
+    token=os.environ.get('UPSTASH_REDIS_REST_TOKEN')
+)
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -27,22 +34,18 @@ class handler(BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps({'error': 'Email and password required'}).encode())
                 return
 
-            conn = sqlite3.connect('users.db')
-            c = conn.cursor()
-
-            c.execute('SELECT * FROM users WHERE email = ?', (email,))
-            user = c.fetchone()
-            conn.close()
-
-            if not user:
+            # Get user data from Redis
+            user_data = redis_client.get(f"user:{email}")
+            if not user_data:
                 self.send_response(401)
                 self.send_header('Content-type', 'application/json')
                 self.end_headers()
                 self.wfile.write(json.dumps({'error': 'Invalid email or password'}).encode())
                 return
 
+            user = json.loads(user_data)
             hashed_pw = hash_password(password)
-            if user[3] != hashed_pw:
+            if user['password'] != hashed_pw:
                 self.send_response(401)
                 self.send_header('Content-type', 'application/json')
                 self.end_headers()
@@ -57,7 +60,7 @@ class handler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({
                 'message': 'Login successful!',
                 'token': token,
-                'user': {'name': user[1], 'email': user[2]}
+                'user': {'name': user['name'], 'email': user['email']}
             }).encode())
 
         except Exception as e:
