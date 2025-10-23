@@ -1,8 +1,6 @@
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-import sqlite3
-import psycopg2
-from psycopg2.extras import RealDictCursor
+import redis
 import hashlib
 import secrets
 from datetime import datetime
@@ -10,62 +8,40 @@ import requests
 import base64
 import urllib.parse
 import os
+import json
 
 app = Flask(__name__)
 CORS(app)
 
 # No API keys needed! Pollinations.ai is completely free
 
-# Database setup
-def get_db_connection():
-    """Get database connection - PostgreSQL in production, SQLite for local dev"""
+# Database setup - Using Upstash Redis for Vercel
+def get_redis_client():
+    """Get Redis client for data storage"""
     try:
-        # Try PostgreSQL first (for production/Vercel)
-        conn = psycopg2.connect(
-            host=os.environ.get('DB_HOST'),
-            database=os.environ.get('DB_NAME'),
-            user=os.environ.get('DB_USER'),
-            password=os.environ.get('DB_PASSWORD'),
-            port=os.environ.get('DB_PORT', '5432')
-        )
-        return conn, 'postgres'
-    except (psycopg2.OperationalError, TypeError):
-        # Fallback to SQLite for local development
-        conn = sqlite3.connect('users.db')
-        return conn, 'sqlite'
+        # Try Upstash Redis first (for production/Vercel)
+        redis_url = os.environ.get('UPSTASH_REDIS_REST_URL')
+        redis_token = os.environ.get('UPSTASH_REDIS_REST_TOKEN')
+
+        if redis_url and redis_token:
+            # Use Upstash REST API for serverless environments
+            import upstash_redis
+            return upstash_redis.Redis(url=redis_url, token=redis_token), 'upstash'
+        else:
+            # Fallback to local Redis (for development)
+            return redis.Redis(host='localhost', port=6379, decode_responses=True), 'local'
+    except Exception:
+        # If Redis fails, we'll use in-memory storage (not persistent)
+        return None, 'memory'
+
+# Global storage for in-memory fallback
+memory_users = {}
 
 def init_db():
-    """Initialize database - create tables if they don't exist"""
-    conn, db_type = get_db_connection()
+    """Initialize database - no setup needed for Redis"""
+    pass
 
-    if db_type == 'postgres':
-        with conn.cursor() as c:
-            c.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    id SERIAL PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    email TEXT UNIQUE NOT NULL,
-                    password TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-        conn.commit()
-    else:  # SQLite
-        c = conn.cursor()
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                email TEXT UNIQUE NOT NULL,
-                password TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        conn.commit()
-
-    conn.close()
-
-# Initialize database on app startup
+# Initialize on startup
 init_db()
 
 def hash_password(password):
@@ -93,36 +69,35 @@ def signup():
         if len(password) < 6:
             return jsonify({'error': 'Password must be at least 6 characters'}), 400
 
-        conn, db_type = get_db_connection()
+        redis_client, db_type = get_redis_client()
 
-        if db_type == 'postgres':
-            with conn.cursor(cursor_factory=RealDictCursor) as c:
-                # Check if user already exists
-                c.execute('SELECT * FROM users WHERE email = %s', (email,))
-                if c.fetchone():
-                    conn.close()
-                    return jsonify({'error': 'Email already registered'}), 409
-
-                # Insert new user
-                hashed_pw = hash_password(password)
-                c.execute('INSERT INTO users (name, email, password) VALUES (%s, %s, %s)',
-                          (name, email, hashed_pw))
-            conn.commit()
-        else:  # SQLite
-            c = conn.cursor()
-            # Check if user already exists
-            c.execute('SELECT * FROM users WHERE email = ?', (email,))
-            if c.fetchone():
-                conn.close()
+        # Check if user already exists
+        if db_type == 'upstash':
+            existing_user = redis_client.get(f"user:{email}")
+            if existing_user:
+                return jsonify({'error': 'Email already registered'}), 409
+        elif db_type == 'local':
+            if redis_client.exists(f"user:{email}"):
+                return jsonify({'error': 'Email already registered'}), 409
+        else:  # memory
+            if email in memory_users:
                 return jsonify({'error': 'Email already registered'}), 409
 
-            # Insert new user
-            hashed_pw = hash_password(password)
-            c.execute('INSERT INTO users (name, email, password) VALUES (?, ?, ?)',
-                      (name, email, hashed_pw))
-            conn.commit()
+        # Create user data
+        user_data = {
+            'name': name,
+            'email': email,
+            'password': hash_password(password),
+            'created_at': datetime.now().isoformat()
+        }
 
-        conn.close()
+        # Store user
+        if db_type == 'upstash':
+            redis_client.set(f"user:{email}", json.dumps(user_data))
+        elif db_type == 'local':
+            redis_client.set(f"user:{email}", json.dumps(user_data))
+        else:  # memory
+            memory_users[email] = user_data
 
         return jsonify({
             'message': 'Account created successfully!',
@@ -142,18 +117,23 @@ def login():
         if not email or not password:
             return jsonify({'error': 'Email and password required'}), 400
 
-        conn, db_type = get_db_connection()
+        redis_client, db_type = get_redis_client()
 
-        if db_type == 'postgres':
-            with conn.cursor(cursor_factory=RealDictCursor) as c:
-                c.execute('SELECT * FROM users WHERE email = %s', (email,))
-                user = c.fetchone()
-        else:  # SQLite
-            c = conn.cursor()
-            c.execute('SELECT * FROM users WHERE email = ?', (email,))
-            user = c.fetchone()
-
-        conn.close()
+        # Get user data
+        if db_type == 'upstash':
+            user_data = redis_client.get(f"user:{email}")
+            if user_data:
+                user = json.loads(user_data)
+            else:
+                user = None
+        elif db_type == 'local':
+            user_data = redis_client.get(f"user:{email}")
+            if user_data:
+                user = json.loads(user_data)
+            else:
+                user = None
+        else:  # memory
+            user = memory_users.get(email)
 
         if not user:
             return jsonify({'error': 'Invalid email or password'}), 401
@@ -183,21 +163,19 @@ def forgot_password():
         if not email:
             return jsonify({'error': 'Email is required'}), 400
 
-        conn, db_type = get_db_connection()
+        redis_client, db_type = get_redis_client()
 
-        if db_type == 'postgres':
-            with conn.cursor(cursor_factory=RealDictCursor) as c:
-                c.execute('SELECT * FROM users WHERE email = %s', (email,))
-                user = c.fetchone()
-        else:  # SQLite
-            c = conn.cursor()
-            c.execute('SELECT * FROM users WHERE email = ?', (email,))
-            user = c.fetchone()
-
-        conn.close()
+        # Check if user exists
+        if db_type == 'upstash':
+            user_data = redis_client.get(f"user:{email}")
+            user_exists = user_data is not None
+        elif db_type == 'local':
+            user_exists = redis_client.exists(f"user:{email}")
+        else:  # memory
+            user_exists = email in memory_users
 
         # Always return success to prevent email enumeration
-        if user:
+        if user_exists:
             # In production, send actual email here
             print(f"Password reset link would be sent to: {email}")
             return jsonify({
