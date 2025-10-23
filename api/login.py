@@ -3,7 +3,6 @@ import json
 import hashlib
 import secrets
 import os
-from upstash_redis import Redis
 
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
@@ -11,11 +10,10 @@ def hash_password(password):
 def generate_token():
     return secrets.token_hex(32)
 
-# Initialize Redis client
-redis_client = Redis(
-    url=os.environ.get('UPSTASH_REDIS_REST_URL'),
-    token=os.environ.get('UPSTASH_REDIS_REST_TOKEN')
-)
+# Use Vercel KV (Redis-compatible)
+import redis
+
+redis_client = redis.from_url(os.environ.get('KV_URL', 'redis://localhost:6379'))
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):

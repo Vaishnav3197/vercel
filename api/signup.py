@@ -2,17 +2,15 @@ from http.server import BaseHTTPRequestHandler
 import json
 import hashlib
 import os
-from upstash_redis import Redis
 from datetime import datetime
 
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
-# Initialize Redis client
-redis_client = Redis(
-    url=os.environ.get('UPSTASH_REDIS_REST_URL'),
-    token=os.environ.get('UPSTASH_REDIS_REST_TOKEN')
-)
+# Use Vercel KV (Redis-compatible)
+import redis
+
+redis_client = redis.from_url(os.environ.get('KV_URL', 'redis://localhost:6379'))
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
