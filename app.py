@@ -1,6 +1,8 @@
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
 import hashlib
 import secrets
 from datetime import datetime
@@ -15,19 +17,52 @@ CORS(app)
 # No API keys needed! Pollinations.ai is completely free
 
 # Database setup
-def init_db():
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+def get_db_connection():
+    """Get database connection - PostgreSQL in production, SQLite for local dev"""
+    try:
+        # Try PostgreSQL first (for production/Vercel)
+        conn = psycopg2.connect(
+            host=os.environ.get('DB_HOST'),
+            database=os.environ.get('DB_NAME'),
+            user=os.environ.get('DB_USER'),
+            password=os.environ.get('DB_PASSWORD'),
+            port=os.environ.get('DB_PORT', '5432')
         )
-    ''')
-    conn.commit()
+        return conn, 'postgres'
+    except (psycopg2.OperationalError, TypeError):
+        # Fallback to SQLite for local development
+        conn = sqlite3.connect('users.db')
+        return conn, 'sqlite'
+
+def init_db():
+    """Initialize database - create tables if they don't exist"""
+    conn, db_type = get_db_connection()
+
+    if db_type == 'postgres':
+        with conn.cursor() as c:
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    email TEXT UNIQUE NOT NULL,
+                    password TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+        conn.commit()
+    else:  # SQLite
+        c = conn.cursor()
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                email TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.commit()
+
     conn.close()
 
 # Initialize database on app startup
@@ -58,20 +93,35 @@ def signup():
         if len(password) < 6:
             return jsonify({'error': 'Password must be at least 6 characters'}), 400
 
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
+        conn, db_type = get_db_connection()
 
-        # Check if user already exists
-        c.execute('SELECT * FROM users WHERE email = ?', (email,))
-        if c.fetchone():
-            conn.close()
-            return jsonify({'error': 'Email already registered'}), 409
+        if db_type == 'postgres':
+            with conn.cursor(cursor_factory=RealDictCursor) as c:
+                # Check if user already exists
+                c.execute('SELECT * FROM users WHERE email = %s', (email,))
+                if c.fetchone():
+                    conn.close()
+                    return jsonify({'error': 'Email already registered'}), 409
 
-        # Insert new user
-        hashed_pw = hash_password(password)
-        c.execute('INSERT INTO users (name, email, password) VALUES (?, ?, ?)',
-                  (name, email, hashed_pw))
-        conn.commit()
+                # Insert new user
+                hashed_pw = hash_password(password)
+                c.execute('INSERT INTO users (name, email, password) VALUES (%s, %s, %s)',
+                          (name, email, hashed_pw))
+            conn.commit()
+        else:  # SQLite
+            c = conn.cursor()
+            # Check if user already exists
+            c.execute('SELECT * FROM users WHERE email = ?', (email,))
+            if c.fetchone():
+                conn.close()
+                return jsonify({'error': 'Email already registered'}), 409
+
+            # Insert new user
+            hashed_pw = hash_password(password)
+            c.execute('INSERT INTO users (name, email, password) VALUES (?, ?, ?)',
+                      (name, email, hashed_pw))
+            conn.commit()
+
         conn.close()
 
         return jsonify({
@@ -92,26 +142,32 @@ def login():
         if not email or not password:
             return jsonify({'error': 'Email and password required'}), 400
 
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        
-        c.execute('SELECT * FROM users WHERE email = ?', (email,))
-        user = c.fetchone()
+        conn, db_type = get_db_connection()
+
+        if db_type == 'postgres':
+            with conn.cursor(cursor_factory=RealDictCursor) as c:
+                c.execute('SELECT * FROM users WHERE email = %s', (email,))
+                user = c.fetchone()
+        else:  # SQLite
+            c = conn.cursor()
+            c.execute('SELECT * FROM users WHERE email = ?', (email,))
+            user = c.fetchone()
+
         conn.close()
 
         if not user:
             return jsonify({'error': 'Invalid email or password'}), 401
 
         hashed_pw = hash_password(password)
-        if user[3] != hashed_pw:
+        if user['password'] != hashed_pw:
             return jsonify({'error': 'Invalid email or password'}), 401
 
         token = generate_token()
-        
+
         return jsonify({
             'message': 'Login successful!',
             'token': token,
-            'user': {'name': user[1], 'email': user[2]}
+            'user': {'name': user['name'], 'email': user['email']}
         }), 200
 
     except Exception as e:
@@ -127,11 +183,17 @@ def forgot_password():
         if not email:
             return jsonify({'error': 'Email is required'}), 400
 
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        
-        c.execute('SELECT * FROM users WHERE email = ?', (email,))
-        user = c.fetchone()
+        conn, db_type = get_db_connection()
+
+        if db_type == 'postgres':
+            with conn.cursor(cursor_factory=RealDictCursor) as c:
+                c.execute('SELECT * FROM users WHERE email = %s', (email,))
+                user = c.fetchone()
+        else:  # SQLite
+            c = conn.cursor()
+            c.execute('SELECT * FROM users WHERE email = ?', (email,))
+            user = c.fetchone()
+
         conn.close()
 
         # Always return success to prevent email enumeration
