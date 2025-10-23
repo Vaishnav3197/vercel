@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "builds": [
+    { "src": "api/**/*.py", "use": "@vercel/python" }
+  ],
+  "routes": [
+    { "src": "/login", "dest": "/api/login.py" },
+    { "src": "/signup", "dest": "/api/signup.py" },
+    { "src": "/forgot-password", "dest": "/api/forgot-password.py" },
+    { "src": "/ai/generate-image", "dest": "/api/generate-image.py" },
+    { "src": "/(.*)", "dest": "/index.html" }
+  ]
+}
