@@ -10,7 +10,7 @@ def hash_password(password):
 # Use Vercel KV (Redis-compatible)
 import redis
 
-redis_client = redis.from_url(os.environ.get('KV_URL', 'redis://localhost:6379'))
+redis_client = redis.from_url(os.environ.get('KV_URL') or os.environ.get('REDIS_URL', 'redis://localhost:6379'))
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
