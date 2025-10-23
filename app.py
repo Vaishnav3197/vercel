@@ -30,6 +30,9 @@ def init_db():
     conn.commit()
     conn.close()
 
+# Initialize database on app startup
+init_db()
+
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
